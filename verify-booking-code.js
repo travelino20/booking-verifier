@@ -31,11 +31,17 @@
  * }
  */
 
-#!/usr/bin/env node
-
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+
+function nextArgValue(argv, index, flagName) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`Lipsește valoarea pentru ${flagName}`);
+  }
+  return value;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -51,36 +57,55 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
 
-    if (a === '--code') args.code = argv[++i];
-    else if (a === '--headful') args.headful = true;
-    else if (a === '--name') args.name = argv[++i];
-    else if (a === '--email') args.email = argv[++i];
-    else if (a === '--phone') args.phone = argv[++i];
-    else if (a === '--timeout') args.timeoutMs = parseInt(argv[++i], 10);
-    else if (a === '--screenshots-dir') args.screenshotsDir = path.resolve(argv[++i]);
-    else if (a === '--help' || a === '-h') {
+    if (a === '--code') {
+      args.code = nextArgValue(argv, i, '--code');
+      i++;
+    } else if (a === '--headful') {
+      args.headful = true;
+    } else if (a === '--name') {
+      args.name = nextArgValue(argv, i, '--name');
+      i++;
+    } else if (a === '--email') {
+      args.email = nextArgValue(argv, i, '--email');
+      i++;
+    } else if (a === '--phone') {
+      args.phone = nextArgValue(argv, i, '--phone');
+      i++;
+    } else if (a === '--timeout') {
+      const raw = nextArgValue(argv, i, '--timeout');
+      args.timeoutMs = parseInt(raw, 10);
+      i++;
+    } else if (a === '--screenshots-dir') {
+      const raw = nextArgValue(argv, i, '--screenshots-dir');
+      args.screenshotsDir = path.resolve(raw);
+      i++;
+    } else if (a === '--help' || a === '-h') {
       console.log(
         'Usage: node verify-booking-code.js --code CODE [--headful] [--name N] [--email E] [--phone P] [--timeout MS] [--screenshots-dir DIR]'
       );
       process.exit(0);
+    } else {
+      throw new Error(`Argument necunoscut: ${a}`);
     }
   }
 
   if (!args.code) {
-    console.error('ERROR: missing --code. Example: node verify-booking-code.js --code BOOK15OFF');
-    process.exit(2);
+    throw new Error('Lipsește --code. Exemplu: node verify-booking-code.js --code BOOK15OFF');
   }
 
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs < 5000) {
-    console.error('ERROR: --timeout must be a number >= 5000');
-    process.exit(2);
+    throw new Error('--timeout trebuie să fie un număr >= 5000');
   }
 
   return args;
 }
 
 function ensureDir(dir) {
-  const finalDir = dir || path.resolve(process.cwd(), 'artifacts');
+  const finalDir =
+    typeof dir === 'string' && dir.trim()
+      ? dir
+      : path.resolve(process.cwd(), 'artifacts');
+
   fs.mkdirSync(finalDir, { recursive: true });
   return finalDir;
 }
@@ -135,6 +160,7 @@ async function safeText(locator) {
 
 async function captureScreenshot(page, filePath) {
   try {
+    if (!page || typeof filePath !== 'string' || !filePath.trim()) return null;
     await page.screenshot({ path: filePath, fullPage: true });
     return filePath;
   } catch {
@@ -280,7 +306,7 @@ async function maybeSelectOneRoom(hotelPage) {
   return false;
 }
 
-async function clickReserve(hotelPage, timeoutMs) {
+async function clickReserve(hotelPage) {
   const reserveBtn = hotelPage.getByRole('button', {
     name: /Voi rezerva|I'll reserve|Reserve|Rezervă|Selectați|Select/i
   }).first();
@@ -313,7 +339,7 @@ async function clickReserve(hotelPage, timeoutMs) {
     }
   }
 
-  throw new Error(`Nu am găsit un buton de rezervare acționabil în ${timeoutMs}ms`);
+  throw new Error('Nu am găsit un buton de rezervare acționabil');
 }
 
 async function fillGuestDetails(page, name, email, phone) {
@@ -461,14 +487,14 @@ function detectPromoOutcome(bodyTextLower) {
 
 async function verify(input = {}) {
   const {
-    code,
+    code = null,
     headful = false,
     name = 'Test Verifier',
     email = 'verifier@example.com',
     phone = '0700000000',
     timeoutMs = 90_000,
     screenshotsDir = path.resolve(process.cwd(), 'artifacts')
-  } = input;
+  } = input || {};
 
   const safeScreenshotsDir = ensureDir(screenshotsDir);
 
@@ -490,7 +516,7 @@ async function verify(input = {}) {
   const page = await context.newPage();
 
   const result = {
-    code: code || null,
+    code,
     valid: false,
     reason: null,
     priceBefore: null,
@@ -554,7 +580,7 @@ async function verify(input = {}) {
     );
 
     await maybeSelectOneRoom(hotelPage);
-    await clickReserve(hotelPage, timeoutMs);
+    await clickReserve(hotelPage);
     await fillGuestDetails(hotelPage, name, email, phone);
     await goToFinalDetails(hotelPage);
 
@@ -597,10 +623,8 @@ async function verify(input = {}) {
   } catch (err) {
     const activePage = context.pages().slice(-1)[0] || page;
     const errorShot = path.join(safeScreenshotsDir, `booking-error-${nowStamp()}.png`);
-    const saved = await captureScreenshot(activePage, errorShot);
-
+    result.artifacts.errorScreenshot = await captureScreenshot(activePage, errorShot);
     result.reason = 'Eroare în flux: ' + (err && err.message ? err.message : String(err));
-    result.artifacts.errorScreenshot = saved;
   } finally {
     await browser.close();
   }
@@ -621,7 +645,7 @@ if (require.main === module) {
       const fallback = {
         code: null,
         valid: false,
-        reason: 'Eroare fatală: ' + (err && err.message ? err.message : String(err)),
+        reason: 'Eroare la verificare: ' + (err && err.message ? err.message : String(err)),
         priceBefore: null,
         priceAfter: null,
         discount: 0,
@@ -629,7 +653,6 @@ if (require.main === module) {
         hotel: null,
         checkedAt: new Date().toISOString()
       };
-
       process.stdout.write(JSON.stringify(fallback, null, 2) + '\n');
       process.exit(1);
     }
