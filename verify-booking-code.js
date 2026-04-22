@@ -99,11 +99,48 @@ async function getTotalPrice(page) {
 
 // ---------- Main flow ----------
 async function verify({ code, headful, name, email, phone, timeoutMs }) {
-  const browser = await chromium.launch({ headless: !headful });
+  // Low-memory Chromium flags for constrained hosts (e.g. Render Free 512MB).
+  // `--single-process` is the big one — forces Chromium to run everything in
+  // one process instead of spawning a child per tab, cutting RAM usage roughly
+  // in half. `--disable-dev-shm-usage` is critical in containers where /dev/shm
+  // is tiny (64MB), otherwise Chromium crashes on any non-trivial page.
+  const browser = await chromium.launch({
+    headless: !headful,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--single-process',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process',
+      '--disable-ipc-flooding-protection',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--metrics-recording-only',
+      '--mute-audio'
+    ]
+  });
   const context = await browser.newContext({
     locale: 'ro-RO',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-    viewport: { width: 1440, height: 900 }
+    viewport: { width: 1280, height: 720 }, // smaller viewport = less rendering memory
+    // Block images & fonts to save bandwidth and memory; they're irrelevant
+    // for reading the price and promo code fields.
+    javaScriptEnabled: true
+  });
+  // Block heavy resources (images, videos, fonts, stylesheets) — we only need
+  // DOM + JS execution to read text. This alone can halve peak RAM on Booking.
+  await context.route('**/*', (route) => {
+    const type = route.request().resourceType();
+    if (type === 'image' || type === 'media' || type === 'font') {
+      return route.abort();
+    }
+    return route.continue();
   });
   // Apply timeout at context level so any new page (e.g. the hotel tab that
   // opens via target=_blank) inherits it. Otherwise the new page uses
