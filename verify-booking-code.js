@@ -150,7 +150,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
 
     // Don't waitForLoadState here — Booking keeps networking active, and the
     // room-selector appears well before full load. Wait directly on the element.
-    await hotelPage.waitForSelector('select[name^="nr_rooms"]', { timeout: 45_000 });
+    await hotelPage.waitForSelector('select[name^="nr_rooms"]', { timeout: 60_000 });
     await hotelPage.evaluate(() => {
       const sel = document.querySelector('select[name^="nr_rooms"]');
       if (sel) {
