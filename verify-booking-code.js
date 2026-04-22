@@ -35,9 +35,9 @@
  *   "checkedAt": "2026-04-22T12:34:56.000Z"
  * }
  */
-
+ 
 const { chromium } = require('playwright');
-
+ 
 // ---------- CLI parsing ----------
 function parseArgs(argv) {
   const args = {
@@ -67,14 +67,14 @@ function parseArgs(argv) {
   }
   return args;
 }
-
+ 
 // ---------- Helpers ----------
 function datePlus(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
-
+ 
 // Extrage un preț din text de tip "852,61 lei" sau "1.495,80 lei" → 852.61 / 1495.80
 function parsePriceRo(text) {
   if (!text) return null;
@@ -84,7 +84,7 @@ function parsePriceRo(text) {
   const n = parseFloat(raw);
   return Number.isFinite(n) ? n : null;
 }
-
+ 
 async function getTotalPrice(page) {
   // The "Total" block shows current grand total on Booking's stage 3.
   // It's labeled "Total" followed by "XXX lei".
@@ -96,7 +96,7 @@ async function getTotalPrice(page) {
   const all = [...body.matchAll(/([\d.,]+\s*lei)/gi)].map(x => parsePriceRo(x[1])).filter(Boolean);
   return all.length ? Math.max(...all) : null;
 }
-
+ 
 // ---------- Main flow ----------
 async function verify({ code, headful, name, email, phone, timeoutMs }) {
   const browser = await chromium.launch({ headless: !headful });
@@ -111,7 +111,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
   context.setDefaultTimeout(timeoutMs);
   context.setDefaultNavigationTimeout(timeoutMs);
   const page = await context.newPage();
-
+ 
   const result = {
     code,
     valid: false,
@@ -123,52 +123,65 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     hotel: null,
     checkedAt: new Date().toISOString()
   };
-
+ 
   try {
     const checkin = datePlus(14);
     const checkout = datePlus(16);
     const searchUrl = `https://www.booking.com/searchresults.ro.html?ss=Bucure%C8%99ti&checkin=${checkin}&checkout=${checkout}&group_adults=2&no_rooms=1`;
-
+ 
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
-
+ 
     // Dismiss cookie banner if present
     try {
       const refuse = page.getByRole('button', { name: /Refuz|Reject/i }).first();
       if (await refuse.isVisible({ timeout: 3000 })) await refuse.click();
     } catch (_) { /* ignore */ }
-
+ 
     // Click the first hotel result
     const firstCard = page.locator('[data-testid="property-card"]').first();
     await firstCard.waitFor({ state: 'visible' });
     result.hotel = (await firstCard.locator('[data-testid="title"]').innerText().catch(() => 'unknown')).trim();
-
+ 
     // Hotel detail page opens in a new tab
     const [hotelPage] = await Promise.all([
       context.waitForEvent('page'),
       firstCard.locator('[data-testid="title-link"], a').first().click()
     ]);
-
-    // Don't waitForLoadState here — Booking keeps networking active, and the
-    // room-selector appears well before full load. Wait directly on the element.
-    await hotelPage.waitForSelector('select[name^="nr_rooms"]', { timeout: 60_000 });
-    await hotelPage.evaluate(() => {
-      const sel = document.querySelector('select[name^="nr_rooms"]');
-      if (sel) {
-        sel.value = '1';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
+ 
+    // Wait for EITHER a reserve button OR a room-select to appear. Booking
+    // often has the first room pre-selected, so the reserve button alone is
+    // enough. This is more forgiving than waiting on the select specifically.
+    await hotelPage.waitForSelector(
+      'button:has-text("Voi rezerva"), button:has-text("I\'ll reserve"), button:has-text("Reserve"), select[name^="nr_rooms"]',
+      { timeout: 60_000 }
+    );
+ 
+    // If there's a visible room-quantity select still at 0, bump it to 1.
+    try {
+      const hasSelect = await hotelPage.locator('select[name^="nr_rooms"]').first().isVisible({ timeout: 2000 });
+      if (hasSelect) {
+        await hotelPage.evaluate(() => {
+          const sel = document.querySelector('select[name^="nr_rooms"]');
+          if (sel && sel.value === '0') {
+            sel.value = '1';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        });
       }
-    });
-
-    // Click "Voi rezerva" / "I'll reserve"
-    await hotelPage.getByRole('button', { name: /Voi rezerva|I'll reserve|Reserve/i }).first().click();
-
+    } catch (_) { /* no select → already-selected default */ }
+ 
+    // Click the first visible "Voi rezerva" / "Reserve" button.
+    const reserveBtn = hotelPage.getByRole('button', { name: /Voi rezerva|I'll reserve|Reserve/i }).first();
+    await reserveBtn.waitFor({ state: 'visible', timeout: 15_000 });
+    await reserveBtn.click();
+ 
     // Stage 2: fill minimal personal details. Wait on the element we'll act on
     // rather than loadState, which is unreliable on Booking.
     await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 45_000 });
-
+ 
     const [firstName, ...lastParts] = name.split(' ');
     const lastName = lastParts.join(' ') || 'User';
-
+ 
     await hotelPage.fill('input[name="firstname"]', firstName);
     await hotelPage.fill('input[name="lastname"]', lastName);
     await hotelPage.fill('input[name="email"]', email);
@@ -177,29 +190,29 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       const phoneInput = hotelPage.locator('input[type="tel"], input[name*="phone"]').first();
       if (await phoneInput.isVisible()) await phoneInput.fill(phone);
     } catch (_) {}
-
+ 
     // Proceed to stage 3. Again, skip waitForLoadState — wait on the element
     // that marks stage 3 instead.
     await hotelPage.getByRole('button', { name: /Urmează|Next|Ultimele detalii/i }).first().click();
     await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 45_000 });
-
+ 
     // Read price BEFORE
     await hotelPage.waitForTimeout(1500);
     result.priceBefore = await getTotalPrice(hotelPage);
-
+ 
     // Apply the promo code
     const codeInput = hotelPage.locator('input[placeholder*="promo" i], input[aria-label*="promo" i]').first();
     await codeInput.waitFor({ state: 'visible', timeout: 15_000 });
     await codeInput.fill(code);
-
+ 
     const applyBtn = hotelPage.getByRole('button', { name: /Aplicați|Apply/i }).first();
     await applyBtn.click();
-
+ 
     // Wait for either an error message or a price update
     await hotelPage.waitForTimeout(3500);
     const bodyAfter = (await hotelPage.evaluate(() => document.body.innerText || '')).toLowerCase();
     result.priceAfter = await getTotalPrice(hotelPage);
-
+ 
     if (/nu este valid|invalid code|not valid|nu este valabil/.test(bodyAfter)) {
       result.valid = false;
       result.reason = 'Booking a răspuns: codul nu este valid.';
@@ -218,13 +231,13 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
   } finally {
     await browser.close();
   }
-
+ 
   return result;
 }
-
+ 
 // ---------- Exports (for server.js) ----------
 module.exports = { verify };
-
+ 
 // ---------- CLI entry (only when run directly) ----------
 if (require.main === module) {
   (async () => {
