@@ -164,39 +164,27 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
   try {
     const checkin = datePlus(14);
     const checkout = datePlus(16);
-    const searchUrl = `https://www.booking.com/searchresults.ro.html?ss=Bucure%C8%99ti&checkin=${checkin}&checkout=${checkout}&group_adults=2&no_rooms=1`;
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
+    // Skip the search step entirely. Go directly to a fixed hotel page (much
+    // faster on low-memory hosts). Hotel chosen for stable single-room layout.
+    const hotelUrl = `https://www.booking.com/hotel/ro/tomis-garden-bucuresti.html?checkin=${checkin}&checkout=${checkout}&group_adults=2&no_rooms=1&selected_currency=RON`;
+    result.hotel = 'Tomis Garden București';
+    const hotelPage = page;
+
+    await hotelPage.goto(hotelUrl, { waitUntil: 'domcontentloaded' });
 
     // Dismiss cookie banner if present
     try {
-      const refuse = page.getByRole('button', { name: /Refuz|Reject/i }).first();
+      const refuse = hotelPage.getByRole('button', { name: /Refuz|Reject/i }).first();
       if (await refuse.isVisible({ timeout: 3000 })) await refuse.click();
     } catch (_) { /* ignore */ }
-
-    // Click the first hotel result
-    const firstCard = page.locator('[data-testid="property-card"]').first();
-    await firstCard.waitFor({ state: 'visible' });
-    result.hotel = (await firstCard.locator('[data-testid="title"]').innerText().catch(() => 'unknown')).trim();
-
-    // Booking normally opens hotel pages in a new tab. But under --single-process
-    // Chromium (low-memory mode) and some navigation policies, target=_blank is
-    // ignored. Grab the href directly and navigate in-place — works in both cases.
-    const hotelHref = await firstCard
-      .locator('[data-testid="title-link"], a')
-      .first()
-      .getAttribute('href');
-    if (!hotelHref) throw new Error('Nu s-a găsit link-ul către hotel.');
-    const hotelUrl = hotelHref.startsWith('http') ? hotelHref : 'https://www.booking.com' + hotelHref;
-    const hotelPage = page; // reuse the same page — no new tab
-    await hotelPage.goto(hotelUrl, { waitUntil: 'domcontentloaded' });
 
     // Wait for EITHER a reserve button OR a room-select to appear. Booking
     // often has the first room pre-selected, so the reserve button alone is
     // enough. This is more forgiving than waiting on the select specifically.
     await hotelPage.waitForSelector(
       'button:has-text("Voi rezerva"), button:has-text("I\'ll reserve"), button:has-text("Reserve"), select[name^="nr_rooms"]',
-      { timeout: 60_000 }
+      { timeout: 30_000 }
     );
 
     // If there's a visible room-quantity select still at 0, bump it to 1.
@@ -219,13 +207,13 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     const reserveBtn = hotelPage.locator(
       'button:has-text("Voi rezerva"), button:has-text("I\'ll reserve"), button:has-text("Reserve"), a:has-text("Voi rezerva"), a:has-text("I\'ll reserve"), a:has-text("Reserve")'
     ).first();
-    await reserveBtn.waitFor({ state: 'visible', timeout: 30_000 });
+    await reserveBtn.waitFor({ state: 'visible', timeout: 20_000 });
     await reserveBtn.scrollIntoViewIfNeeded().catch(() => {});
     await reserveBtn.click();
 
     // Stage 2: fill minimal personal details. Wait on the element we'll act on
     // rather than loadState, which is unreliable on Booking.
-    await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 45_000 });
+    await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 30_000 });
 
     const [firstName, ...lastParts] = name.split(' ');
     const lastName = lastParts.join(' ') || 'User';
@@ -242,7 +230,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     // Proceed to stage 3. Again, skip waitForLoadState — wait on the element
     // that marks stage 3 instead.
     await hotelPage.getByRole('button', { name: /Urmează|Next|Ultimele detalii/i }).first().click();
-    await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 45_000 });
+    await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 30_000 });
 
     // Read price BEFORE
     await hotelPage.waitForTimeout(1500);
