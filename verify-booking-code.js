@@ -31,11 +31,12 @@
  * }
  */
 
+#!/usr/bin/env node
+
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 
-// ---------- CLI parsing ----------
 function parseArgs(argv) {
   const args = {
     code: null,
@@ -70,7 +71,7 @@ function parseArgs(argv) {
     process.exit(2);
   }
 
-  if (!Number.isFinite(args.timeoutMs) || args.timeoutMs < 5_000) {
+  if (!Number.isFinite(args.timeoutMs) || args.timeoutMs < 5000) {
     console.error('ERROR: --timeout must be a number >= 5000');
     process.exit(2);
   }
@@ -78,9 +79,10 @@ function parseArgs(argv) {
   return args;
 }
 
-// ---------- Helpers ----------
 function ensureDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
+  const finalDir = dir || path.resolve(process.cwd(), 'artifacts');
+  fs.mkdirSync(finalDir, { recursive: true });
+  return finalDir;
 }
 
 function nowStamp() {
@@ -103,7 +105,6 @@ function splitName(fullName) {
   };
 }
 
-// Extrage un preț din text de tip "852,61 lei" sau "1.495,80 lei" → 852.61 / 1495.80
 function parsePriceRo(text) {
   if (!text) return null;
 
@@ -154,9 +155,9 @@ async function dismissCookieBanner(page) {
         return true;
       }
     } catch {
-      // ignore
     }
   }
+
   return false;
 }
 
@@ -189,14 +190,12 @@ async function getTotalPrice(page) {
     .filter(v => v != null);
 
   if (all.length) {
-    const max = Math.max(...all);
-    candidates.push(max);
+    candidates.push(Math.max(...all));
   }
 
   if (!candidates.length) return null;
 
-  const sorted = candidates.filter(v => v != null).sort((a, b) => b - a);
-  return sorted[0] ?? null;
+  return candidates.sort((a, b) => b - a)[0] ?? null;
 }
 
 async function waitForAnyVisible(pageOrFrame, selectors, timeoutMs) {
@@ -214,6 +213,7 @@ async function waitForAnyVisible(pageOrFrame, selectors, timeoutMs) {
         lastError = err;
       }
     }
+
     await pageOrFrame.waitForTimeout(400);
   }
 
@@ -231,13 +231,13 @@ async function openHotelDetailsFromCard(searchPage, firstCard, timeoutMs) {
     hotelLink = fallbackLink;
   }
 
-  const popupPromise = searchPage.waitForEvent('popup', { timeout: 15_000 }).catch(() => null);
+  const popupPromise = searchPage.waitForEvent('popup', { timeout: 15000 }).catch(() => null);
 
   try {
-    await hotelLink.click({ timeout: 15_000 });
+    await hotelLink.click({ timeout: 15000 });
   } catch {
     await hotelLink.scrollIntoViewIfNeeded().catch(() => null);
-    await hotelLink.click({ force: true, timeout: 15_000 });
+    await hotelLink.click({ force: true, timeout: 15000 });
   }
 
   const popup = await popupPromise;
@@ -275,27 +275,26 @@ async function maybeSelectOneRoom(hotelPage) {
       return true;
     }
   } catch {
-    // ignore
   }
 
   return false;
 }
 
 async function clickReserve(hotelPage, timeoutMs) {
-  const reserveButtonNames = /Voi rezerva|I'll reserve|Reserve|Rezervă|Selectați|Select/i;
-  const reserveBtn = hotelPage.getByRole('button', { name: reserveButtonNames }).first();
+  const reserveBtn = hotelPage.getByRole('button', {
+    name: /Voi rezerva|I'll reserve|Reserve|Rezervă|Selectați|Select/i
+  }).first();
 
   try {
-    await reserveBtn.waitFor({ state: 'visible', timeout: 20_000 });
-    await reserveBtn.click({ timeout: 10_000 });
+    await reserveBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await reserveBtn.click({ timeout: 10000 });
     return true;
   } catch {
-    // fallback
   }
 
   const fallbackSelectors = [
     'button:has-text("Voi rezerva")',
-    'button:has-text("I\'ll reserve")',
+    'button:has-text("I\\'ll reserve")',
     'button:has-text("Reserve")',
     'button:has-text("Rezervă")',
     'button:has-text("Select")',
@@ -307,11 +306,10 @@ async function clickReserve(hotelPage, timeoutMs) {
       const btn = hotelPage.locator(selector).first();
       if (await btn.isVisible({ timeout: 2500 })) {
         await btn.scrollIntoViewIfNeeded().catch(() => null);
-        await btn.click({ timeout: 10_000 });
+        await btn.click({ timeout: 10000 });
         return true;
       }
     } catch {
-      // ignore
     }
   }
 
@@ -328,7 +326,7 @@ async function fillGuestDetails(page, name, email, phone) {
       'input[id*="firstname"]',
       'input[name*="first"]'
     ],
-    45_000
+    45000
   );
 
   await page.locator('input[name="firstname"], input[id*="firstname"], input[name*="first"]').first().fill(firstName);
@@ -341,7 +339,6 @@ async function fillGuestDetails(page, name, email, phone) {
       await confirm.fill(email);
     }
   } catch {
-    // ignore
   }
 
   try {
@@ -350,7 +347,6 @@ async function fillGuestDetails(page, name, email, phone) {
       await phoneInput.fill(phone);
     }
   } catch {
-    // ignore
   }
 }
 
@@ -360,8 +356,8 @@ async function goToFinalDetails(page) {
   }).first();
 
   try {
-    await nextButton.waitFor({ state: 'visible', timeout: 20_000 });
-    await nextButton.click({ timeout: 10_000 });
+    await nextButton.waitFor({ state: 'visible', timeout: 20000 });
+    await nextButton.click({ timeout: 10000 });
   } catch {
     const fallbackSelectors = [
       'button:has-text("Urmează")',
@@ -372,16 +368,16 @@ async function goToFinalDetails(page) {
     ];
 
     let clicked = false;
+
     for (const selector of fallbackSelectors) {
       try {
         const btn = page.locator(selector).first();
         if (await btn.isVisible({ timeout: 2000 })) {
-          await btn.click({ timeout: 10_000 });
+          await btn.click({ timeout: 10000 });
           clicked = true;
           break;
         }
       } catch {
-        // ignore
       }
     }
 
@@ -395,9 +391,10 @@ async function goToFinalDetails(page) {
     [
       'input[placeholder*="promo" i]',
       'input[aria-label*="promo" i]',
-      'text=/cod promo|promotional|Detalii finale|Final details/i'
+      'input[name*="promo" i]',
+      'input[id*="promo" i]'
     ],
-    45_000
+    45000
   );
 }
 
@@ -410,6 +407,7 @@ async function applyPromoCode(page, code) {
   ];
 
   let codeInput = null;
+
   for (const selector of inputSelectors) {
     try {
       const loc = page.locator(selector).first();
@@ -418,7 +416,6 @@ async function applyPromoCode(page, code) {
         break;
       }
     } catch {
-      // ignore
     }
   }
 
@@ -429,31 +426,27 @@ async function applyPromoCode(page, code) {
   await codeInput.fill(code);
 
   const applyBtnByRole = page.getByRole('button', { name: /Aplicați|Apply|Aplică/i }).first();
+
   try {
     await applyBtnByRole.waitFor({ state: 'visible', timeout: 5000 });
-    await applyBtnByRole.click({ timeout: 10_000 });
+    await applyBtnByRole.click({ timeout: 10000 });
     return;
   } catch {
-    // fallback
   }
 
   const fallbackApply = page.locator('button:has-text("Aplicați"), button:has-text("Apply"), button:has-text("Aplică")').first();
-  await fallbackApply.click({ timeout: 10_000 });
+  await fallbackApply.click({ timeout: 10000 });
 }
 
 function detectPromoOutcome(bodyTextLower) {
-  if (
-    /nu este valid|invalid code|not valid|nu este valabil|cod invalid|codul este invalid/.test(bodyTextLower)
-  ) {
+  if (/nu este valid|invalid code|not valid|nu este valabil|cod invalid|codul este invalid/.test(bodyTextLower)) {
     return {
       valid: false,
       reason: 'Booking a răspuns: codul nu este valid.'
     };
   }
 
-  if (
-    /a fost aplicat|applied|reducere aplicată|discount applied|cod aplicat/.test(bodyTextLower)
-  ) {
+  if (/a fost aplicat|applied|reducere aplicată|discount applied|cod aplicat/.test(bodyTextLower)) {
     return {
       valid: null,
       reason: null
@@ -466,9 +459,18 @@ function detectPromoOutcome(bodyTextLower) {
   };
 }
 
-// ---------- Main flow ----------
-async function verify({ code, headful, name, email, phone, timeoutMs, screenshotsDir }) {
-  ensureDir(screenshotsDir);
+async function verify(input = {}) {
+  const {
+    code,
+    headful = false,
+    name = 'Test Verifier',
+    email = 'verifier@example.com',
+    phone = '0700000000',
+    timeoutMs = 90_000,
+    screenshotsDir = path.resolve(process.cwd(), 'artifacts')
+  } = input;
+
+  const safeScreenshotsDir = ensureDir(screenshotsDir);
 
   const browser = await chromium.launch({
     headless: !headful,
@@ -488,7 +490,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs, screenshot
   const page = await context.newPage();
 
   const result = {
-    code,
+    code: code || null,
     valid: false,
     reason: null,
     priceBefore: null,
@@ -503,6 +505,10 @@ async function verify({ code, headful, name, email, phone, timeoutMs, screenshot
   };
 
   try {
+    if (!code) {
+      throw new Error('Lipsește codul promoțional');
+    }
+
     const checkin = datePlus(14);
     const checkout = datePlus(16);
 
@@ -514,7 +520,11 @@ async function verify({ code, headful, name, email, phone, timeoutMs, screenshot
       `&group_adults=2` +
       `&no_rooms=1`;
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto(searchUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs
+    });
+
     await dismissCookieBanner(page);
 
     const firstCard = page.locator('[data-testid="property-card"]').first();
@@ -534,7 +544,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs, screenshot
       hotelPage,
       [
         'button:has-text("Voi rezerva")',
-        'button:has-text("I\'ll reserve")',
+        'button:has-text("I\\'ll reserve")',
         'button:has-text("Reserve")',
         'button:has-text("Rezervă")',
         'select[name^="nr_rooms"]',
@@ -586,7 +596,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs, screenshot
     }
   } catch (err) {
     const activePage = context.pages().slice(-1)[0] || page;
-    const errorShot = path.join(screenshotsDir, `booking-error-${nowStamp()}.png`);
+    const errorShot = path.join(safeScreenshotsDir, `booking-error-${nowStamp()}.png`);
     const saved = await captureScreenshot(activePage, errorShot);
 
     result.reason = 'Eroare în flux: ' + (err && err.message ? err.message : String(err));
@@ -598,10 +608,8 @@ async function verify({ code, headful, name, email, phone, timeoutMs, screenshot
   return result;
 }
 
-// ---------- Exports ----------
 module.exports = { verify };
 
-// ---------- CLI entry ----------
 if (require.main === module) {
   (async () => {
     try {
@@ -621,6 +629,7 @@ if (require.main === module) {
         hotel: null,
         checkedAt: new Date().toISOString()
       };
+
       process.stdout.write(JSON.stringify(fallback, null, 2) + '\n');
       process.exit(1);
     }
