@@ -248,9 +248,24 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     await hotelPage.waitForTimeout(1500);
     result.priceBefore = await getTotalPrice(hotelPage);
 
-    // Apply the promo code
-    const codeInput = hotelPage.locator('input[placeholder*="promo" i], input[aria-label*="promo" i]').first();
-    await codeInput.waitFor({ state: 'visible', timeout: 15_000 });
+    // The promo code field is usually collapsed behind a toggle: "Adaugă un cod
+    // promoțional" / "Enter a promotional code". Try to expand first.
+    try {
+      const expand = hotelPage.locator(
+        'button:has-text("cod promoțional"), button:has-text("cod promo"), button:has-text("promotional code"), button:has-text("promo code"), a:has-text("cod promoțional"), a:has-text("promo code"), summary:has-text("cod promo"), summary:has-text("promotional")'
+      ).first();
+      if (await expand.isVisible({ timeout: 3000 })) {
+        await expand.click();
+        await hotelPage.waitForTimeout(500);
+      }
+    } catch (_) { /* already open or different layout */ }
+
+    // Apply the promo code — broader selector covering name/id in addition to
+    // placeholder and aria-label.
+    const codeInput = hotelPage.locator(
+      'input[placeholder*="promo" i], input[aria-label*="promo" i], input[name*="promo" i], input[id*="promo" i]'
+    ).first();
+    await codeInput.waitFor({ state: 'visible', timeout: 20_000 });
     await codeInput.fill(code);
 
     const applyBtn = hotelPage.getByRole('button', { name: /Aplicați|Apply/i }).first();
