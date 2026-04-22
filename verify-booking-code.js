@@ -244,6 +244,59 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     await reserveBtn.scrollIntoViewIfNeeded().catch(() => {});
     await reserveBtn.click();
 
+    // First click is often a "soft" CTA that just scrolls to the rooms table
+    // (URL gets `#tab-main` suffix). The real reserve button lives inside the
+    // rooms form, next to each room row, after a quantity is picked. Give the
+    // page a beat to settle, then explicitly work the rooms table.
+    await hotelPage.waitForTimeout(1500);
+
+    // Are we already on stage 2 (firstname visible)? If yes, great — skip ahead.
+    const alreadyStage2 = await hotelPage
+      .locator('input[name="firstname"], input[id*="firstname"]')
+      .first()
+      .isVisible({ timeout: 1000 })
+      .catch(() => false);
+
+    if (!alreadyStage2) {
+      // Step into the rooms form: pick 1 in the first nr_rooms select, then
+      // click the real "Reserve" / "I'll reserve" submit button.
+      await hotelPage.waitForSelector(
+        'select[name^="nr_rooms"], form#hotelroomform, #hprt-table, table.hprt-table',
+        { timeout: 20_000 }
+      );
+
+      // Choose quantity 1 on the first visible room selector.
+      await hotelPage.evaluate(() => {
+        const sel = document.querySelector('select[name^="nr_rooms"]');
+        if (sel) {
+          sel.value = '1';
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+      await hotelPage.waitForTimeout(600);
+
+      // Find the actual submit button in the rooms form.
+      const realReserve = hotelPage.locator([
+        'form#hotelroomform button[type="submit"]',
+        'form#hotelroomform input[type="submit"]',
+        '#hp_book_now_button',
+        'button[data-bui-ref="book-now"]',
+        'button[type="submit"]:has-text("I\'ll reserve")',
+        'button[type="submit"]:has-text("Reserve")',
+        'button[type="submit"]:has-text("Reservieren")',
+        'button[type="submit"]:has-text("Rezervă")',
+        'input[type="submit"][value*="Reserve" i]',
+        'input[type="submit"][value*="Reservieren" i]'
+      ].join(', ')).first();
+      await realReserve.waitFor({ state: 'visible', timeout: 15_000 });
+      await realReserve.scrollIntoViewIfNeeded().catch(() => {});
+      // Click and wait for navigation in parallel so we don't miss fast redirects.
+      await Promise.all([
+        hotelPage.waitForURL(/book|basket|checkout|Booking/i, { timeout: 30_000 }).catch(() => {}),
+        realReserve.click()
+      ]);
+    }
+
     // Stage 2: fill minimal personal details. Wait on the element we'll act on
     // rather than loadState, which is unreliable on Booking.
     await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 30_000 });
