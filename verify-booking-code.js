@@ -179,11 +179,17 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     await firstCard.waitFor({ state: 'visible' });
     result.hotel = (await firstCard.locator('[data-testid="title"]').innerText().catch(() => 'unknown')).trim();
 
-    // Hotel detail page opens in a new tab
-    const [hotelPage] = await Promise.all([
-      context.waitForEvent('page'),
-      firstCard.locator('[data-testid="title-link"], a').first().click()
-    ]);
+    // Booking normally opens hotel pages in a new tab. But under --single-process
+    // Chromium (low-memory mode) and some navigation policies, target=_blank is
+    // ignored. Grab the href directly and navigate in-place — works in both cases.
+    const hotelHref = await firstCard
+      .locator('[data-testid="title-link"], a')
+      .first()
+      .getAttribute('href');
+    if (!hotelHref) throw new Error('Nu s-a găsit link-ul către hotel.');
+    const hotelUrl = hotelHref.startsWith('http') ? hotelHref : 'https://www.booking.com' + hotelHref;
+    const hotelPage = page; // reuse the same page — no new tab
+    await hotelPage.goto(hotelUrl, { waitUntil: 'domcontentloaded' });
 
     // Wait for EITHER a reserve button OR a room-select to appear. Booking
     // often has the first room pre-selected, so the reserve button alone is
