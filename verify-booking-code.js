@@ -1,17 +1,9 @@
 #!/usr/bin/env node
 /**
  * verify-booking-code.js
- * ------------------------------------------------------------
- * Verifică automat un cod promoțional Booking.com parcurgând
- * același flux pe care l-am făcut manual:
- *   1) Caută cazare în București (check-in peste ~14 zile)
- *   2) Alege prima proprietate, apasă "Voi rezerva"
- *   3) Completează minimal datele la pasul 2
- *   4) Pe pasul 3 "Detalii finale": citește prețul inițial,
- *      introduce codul, apasă Aplicați, re-citește prețul.
- *   5) Raportează JSON cu verdictul.
  *
- * OPRIREA se face înainte de orice input de card bancar.
+ * Verifică automat un cod promoțional Booking.com parcurgând fluxul până
+ * înainte de orice input de card bancar.
  *
  * Cerințe:
  *   npm install playwright
@@ -32,12 +24,17 @@
  *   "discount": 0,
  *   "discountPct": 0,
  *   "hotel": "...",
- *   "checkedAt": "2026-04-22T12:34:56.000Z"
+ *   "checkedAt": "2026-04-22T12:34:56.000Z",
+ *   "artifacts": {
+ *     "errorScreenshot": "booking-error-....png"
+ *   }
  * }
  */
- 
+
+const fs = require('fs');
+const path = require('path');
 const { chromium } = require('playwright');
- 
+
 // ---------- CLI parsing ----------
 function parseArgs(argv) {
   const args = {
@@ -46,72 +43,450 @@ function parseArgs(argv) {
     name: 'Test Verifier',
     email: 'verifier@example.com',
     phone: '0700000000',
-    timeoutMs: 60_000
+    timeoutMs: 90_000,
+    screenshotsDir: path.resolve(process.cwd(), 'artifacts')
   };
+
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
+
     if (a === '--code') args.code = argv[++i];
     else if (a === '--headful') args.headful = true;
     else if (a === '--name') args.name = argv[++i];
     else if (a === '--email') args.email = argv[++i];
     else if (a === '--phone') args.phone = argv[++i];
     else if (a === '--timeout') args.timeoutMs = parseInt(argv[++i], 10);
+    else if (a === '--screenshots-dir') args.screenshotsDir = path.resolve(argv[++i]);
     else if (a === '--help' || a === '-h') {
-      console.log(`Usage: node verify-booking-code.js --code CODE [--headful] [--name N] [--email E] [--phone P]`);
+      console.log(
+        'Usage: node verify-booking-code.js --code CODE [--headful] [--name N] [--email E] [--phone P] [--timeout MS] [--screenshots-dir DIR]'
+      );
       process.exit(0);
     }
   }
+
   if (!args.code) {
     console.error('ERROR: missing --code. Example: node verify-booking-code.js --code BOOK15OFF');
     process.exit(2);
   }
+
+  if (!Number.isFinite(args.timeoutMs) || args.timeoutMs < 5_000) {
+    console.error('ERROR: --timeout must be a number >= 5000');
+    process.exit(2);
+  }
+
   return args;
 }
- 
+
 // ---------- Helpers ----------
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function nowStamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
 function datePlus(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
- 
+
+function splitName(fullName) {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: 'Test', lastName: 'User' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: 'User' };
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' ')
+  };
+}
+
 // Extrage un preț din text de tip "852,61 lei" sau "1.495,80 lei" → 852.61 / 1495.80
 function parsePriceRo(text) {
   if (!text) return null;
-  const m = text.match(/([\d.]+(?:,\d+)?)\s*(?:lei|RON)/i);
+
+  const normalized = String(text).replace(/\s+/g, ' ');
+  const m =
+    normalized.match(/([\d.]+(?:,\d{2})?)\s*(?:lei|RON)\b/i) ||
+    normalized.match(/\b(?:RON)\s*([\d.]+(?:,\d{2})?)\b/i);
+
   if (!m) return null;
+
   const raw = m[1].replace(/\./g, '').replace(',', '.');
   const n = parseFloat(raw);
   return Number.isFinite(n) ? n : null;
 }
- 
-async function getTotalPrice(page) {
-  // The "Total" block shows current grand total on Booking's stage 3.
-  // It's labeled "Total" followed by "XXX lei".
-  const body = await page.evaluate(() => document.body.innerText || '');
-  const m = body.match(/Total\s*\n?\s*([\d.,]+\s*lei)/i)
-         || body.match(/([\d.,]+\s*lei)\s*(?:Include taxe|Total)/i);
-  if (m) return parsePriceRo(m[1]);
-  // Fallback: first "xxx lei" near the end of the page.
-  const all = [...body.matchAll(/([\d.,]+\s*lei)/gi)].map(x => parsePriceRo(x[1])).filter(Boolean);
-  return all.length ? Math.max(...all) : null;
+
+function safeNumber(n) {
+  return Number.isFinite(n) ? n : null;
 }
- 
+
+async function safeText(locator) {
+  try {
+    const txt = await locator.first().innerText({ timeout: 5000 });
+    return String(txt || '').trim();
+  } catch {
+    return null;
+  }
+}
+
+async function captureScreenshot(page, filePath) {
+  try {
+    await page.screenshot({ path: filePath, fullPage: true });
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+async function dismissCookieBanner(page) {
+  const candidates = [
+    page.getByRole('button', { name: /Refuz|Respinge|Reject|Decline|Doar necesare|Only necessary/i }).first(),
+    page.getByRole('button', { name: /Accept|Sunt de acord|I agree/i }).first()
+  ];
+
+  for (const btn of candidates) {
+    try {
+      if (await btn.isVisible({ timeout: 2500 })) {
+        await btn.click({ timeout: 5000 });
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+async function getBodyText(page) {
+  return await page.evaluate(() => document.body?.innerText || '');
+}
+
+async function getTotalPrice(page) {
+  const body = await getBodyText(page);
+
+  const candidates = [];
+
+  const directPatterns = [
+    /Total\s*\n?\s*([\d.,]+\s*(?:lei|RON))/i,
+    /Total de plat[ăa]\s*\n?\s*([\d.,]+\s*(?:lei|RON))/i,
+    /Preț final\s*\n?\s*([\d.,]+\s*(?:lei|RON))/i,
+    /([\d.,]+\s*(?:lei|RON))\s*(?:Include taxe|Total|Preț final|Taxe și comisioane)/i
+  ];
+
+  for (const re of directPatterns) {
+    const m = body.match(re);
+    if (m) {
+      const n = parsePriceRo(m[1]);
+      if (n != null) candidates.push(n);
+    }
+  }
+
+  const all = [...body.matchAll(/([\d.,]+\s*(?:lei|RON))/gi)]
+    .map(x => parsePriceRo(x[1]))
+    .filter(v => v != null);
+
+  if (all.length) {
+    const max = Math.max(...all);
+    candidates.push(max);
+  }
+
+  if (!candidates.length) return null;
+
+  const sorted = candidates.filter(v => v != null).sort((a, b) => b - a);
+  return sorted[0] ?? null;
+}
+
+async function waitForAnyVisible(pageOrFrame, selectors, timeoutMs) {
+  const start = Date.now();
+  let lastError = null;
+
+  while (Date.now() - start < timeoutMs) {
+    for (const selector of selectors) {
+      try {
+        const loc = pageOrFrame.locator(selector).first();
+        if (await loc.isVisible({ timeout: 1000 })) {
+          return selector;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    await pageOrFrame.waitForTimeout(400);
+  }
+
+  throw lastError || new Error(`Niciun selector nu a devenit vizibil în ${timeoutMs}ms`);
+}
+
+async function openHotelDetailsFromCard(searchPage, firstCard, timeoutMs) {
+  const preferredLink = firstCard.locator('[data-testid="title-link"]').first();
+  const fallbackLink = firstCard.locator('a').first();
+
+  let hotelLink = preferredLink;
+  try {
+    await preferredLink.waitFor({ state: 'attached', timeout: 5000 });
+  } catch {
+    hotelLink = fallbackLink;
+  }
+
+  const popupPromise = searchPage.waitForEvent('popup', { timeout: 15_000 }).catch(() => null);
+
+  try {
+    await hotelLink.click({ timeout: 15_000 });
+  } catch {
+    await hotelLink.scrollIntoViewIfNeeded().catch(() => null);
+    await hotelLink.click({ force: true, timeout: 15_000 });
+  }
+
+  const popup = await popupPromise;
+  if (popup) {
+    await popup.waitForLoadState('domcontentloaded').catch(() => null);
+    return popup;
+  }
+
+  await searchPage.waitForURL(
+    url => !String(url).includes('/searchresults'),
+    { timeout: timeoutMs }
+  ).catch(() => null);
+
+  return searchPage;
+}
+
+async function maybeSelectOneRoom(hotelPage) {
+  const roomSelect = hotelPage.locator('select[name^="nr_rooms"]').first();
+
+  try {
+    if (await roomSelect.isVisible({ timeout: 2500 })) {
+      const current = await roomSelect.inputValue().catch(() => null);
+      if (current === '0') {
+        await roomSelect.selectOption('1').catch(async () => {
+          await hotelPage.evaluate(() => {
+            const sel = document.querySelector('select[name^="nr_rooms"]');
+            if (sel) {
+              sel.value = '1';
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+              sel.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          });
+        });
+      }
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+
+  return false;
+}
+
+async function clickReserve(hotelPage, timeoutMs) {
+  const reserveButtonNames = /Voi rezerva|I'll reserve|Reserve|Rezervă|Selectați|Select/i;
+  const reserveBtn = hotelPage.getByRole('button', { name: reserveButtonNames }).first();
+
+  try {
+    await reserveBtn.waitFor({ state: 'visible', timeout: 20_000 });
+    await reserveBtn.click({ timeout: 10_000 });
+    return true;
+  } catch {
+    // fallback
+  }
+
+  const fallbackSelectors = [
+    'button:has-text("Voi rezerva")',
+    'button:has-text("I\'ll reserve")',
+    'button:has-text("Reserve")',
+    'button:has-text("Rezervă")',
+    'button:has-text("Select")',
+    '[data-testid*="select-room"] button'
+  ];
+
+  for (const selector of fallbackSelectors) {
+    try {
+      const btn = hotelPage.locator(selector).first();
+      if (await btn.isVisible({ timeout: 2500 })) {
+        await btn.scrollIntoViewIfNeeded().catch(() => null);
+        await btn.click({ timeout: 10_000 });
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  throw new Error(`Nu am găsit un buton de rezervare acționabil în ${timeoutMs}ms`);
+}
+
+async function fillGuestDetails(page, name, email, phone) {
+  const { firstName, lastName } = splitName(name);
+
+  await waitForAnyVisible(
+    page,
+    [
+      'input[name="firstname"]',
+      'input[id*="firstname"]',
+      'input[name*="first"]'
+    ],
+    45_000
+  );
+
+  await page.locator('input[name="firstname"], input[id*="firstname"], input[name*="first"]').first().fill(firstName);
+  await page.locator('input[name="lastname"], input[id*="lastname"], input[name*="last"]').first().fill(lastName);
+  await page.locator('input[name="email"], input[type="email"]').first().fill(email);
+
+  try {
+    const confirm = page.locator('input[name="email_confirm"], input[id*="email_confirm"]').first();
+    if (await confirm.isVisible({ timeout: 2000 })) {
+      await confirm.fill(email);
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const phoneInput = page.locator('input[type="tel"], input[name*="phone"], input[id*="phone"]').first();
+    if (await phoneInput.isVisible({ timeout: 2000 })) {
+      await phoneInput.fill(phone);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function goToFinalDetails(page) {
+  const nextButton = page.getByRole('button', {
+    name: /Urmează|Next|Ultimele detalii|Final details|Continuați|Continue/i
+  }).first();
+
+  try {
+    await nextButton.waitFor({ state: 'visible', timeout: 20_000 });
+    await nextButton.click({ timeout: 10_000 });
+  } catch {
+    const fallbackSelectors = [
+      'button:has-text("Urmează")',
+      'button:has-text("Next")',
+      'button:has-text("Ultimele detalii")',
+      'button:has-text("Continue")',
+      'button[type="submit"]'
+    ];
+
+    let clicked = false;
+    for (const selector of fallbackSelectors) {
+      try {
+        const btn = page.locator(selector).first();
+        if (await btn.isVisible({ timeout: 2000 })) {
+          await btn.click({ timeout: 10_000 });
+          clicked = true;
+          break;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!clicked) {
+      throw new Error('Nu am putut continua către pasul de detalii finale');
+    }
+  }
+
+  await waitForAnyVisible(
+    page,
+    [
+      'input[placeholder*="promo" i]',
+      'input[aria-label*="promo" i]',
+      'text=/cod promo|promotional|Detalii finale|Final details/i'
+    ],
+    45_000
+  );
+}
+
+async function applyPromoCode(page, code) {
+  const inputSelectors = [
+    'input[placeholder*="promo" i]',
+    'input[aria-label*="promo" i]',
+    'input[name*="promo" i]',
+    'input[id*="promo" i]'
+  ];
+
+  let codeInput = null;
+  for (const selector of inputSelectors) {
+    try {
+      const loc = page.locator(selector).first();
+      if (await loc.isVisible({ timeout: 2500 })) {
+        codeInput = loc;
+        break;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!codeInput) {
+    throw new Error('Nu am găsit câmpul pentru cod promoțional');
+  }
+
+  await codeInput.fill(code);
+
+  const applyBtnByRole = page.getByRole('button', { name: /Aplicați|Apply|Aplică/i }).first();
+  try {
+    await applyBtnByRole.waitFor({ state: 'visible', timeout: 5000 });
+    await applyBtnByRole.click({ timeout: 10_000 });
+    return;
+  } catch {
+    // fallback
+  }
+
+  const fallbackApply = page.locator('button:has-text("Aplicați"), button:has-text("Apply"), button:has-text("Aplică")').first();
+  await fallbackApply.click({ timeout: 10_000 });
+}
+
+function detectPromoOutcome(bodyTextLower) {
+  if (
+    /nu este valid|invalid code|not valid|nu este valabil|cod invalid|codul este invalid/.test(bodyTextLower)
+  ) {
+    return {
+      valid: false,
+      reason: 'Booking a răspuns: codul nu este valid.'
+    };
+  }
+
+  if (
+    /a fost aplicat|applied|reducere aplicată|discount applied|cod aplicat/.test(bodyTextLower)
+  ) {
+    return {
+      valid: null,
+      reason: null
+    };
+  }
+
+  return {
+    valid: null,
+    reason: null
+  };
+}
+
 // ---------- Main flow ----------
-async function verify({ code, headful, name, email, phone, timeoutMs }) {
-  const browser = await chromium.launch({ headless: !headful });
+async function verify({ code, headful, name, email, phone, timeoutMs, screenshotsDir }) {
+  ensureDir(screenshotsDir);
+
+  const browser = await chromium.launch({
+    headless: !headful,
+    slowMo: headful ? 120 : 0
+  });
+
   const context = await browser.newContext({
     locale: 'ro-RO',
+    timezoneId: 'Europe/Bucharest',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
     viewport: { width: 1440, height: 900 }
   });
-  // Apply timeout at context level so any new page (e.g. the hotel tab that
-  // opens via target=_blank) inherits it. Otherwise the new page uses
-  // Playwright's default 30s which is too short for Booking.
+
   context.setDefaultTimeout(timeoutMs);
   context.setDefaultNavigationTimeout(timeoutMs);
+
   const page = await context.newPage();
- 
+
   const result = {
     code,
     valid: false,
@@ -121,129 +496,133 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     discount: 0,
     discountPct: 0,
     hotel: null,
-    checkedAt: new Date().toISOString()
+    checkedAt: new Date().toISOString(),
+    artifacts: {
+      errorScreenshot: null
+    }
   };
- 
+
   try {
     const checkin = datePlus(14);
     const checkout = datePlus(16);
-    const searchUrl = `https://www.booking.com/searchresults.ro.html?ss=Bucure%C8%99ti&checkin=${checkin}&checkout=${checkout}&group_adults=2&no_rooms=1`;
- 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
- 
-    // Dismiss cookie banner if present
-    try {
-      const refuse = page.getByRole('button', { name: /Refuz|Reject/i }).first();
-      if (await refuse.isVisible({ timeout: 3000 })) await refuse.click();
-    } catch (_) { /* ignore */ }
- 
-    // Click the first hotel result
+
+    const searchUrl =
+      `https://www.booking.com/searchresults.ro.html` +
+      `?ss=${encodeURIComponent('București')}` +
+      `&checkin=${checkin}` +
+      `&checkout=${checkout}` +
+      `&group_adults=2` +
+      `&no_rooms=1`;
+
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await dismissCookieBanner(page);
+
     const firstCard = page.locator('[data-testid="property-card"]').first();
-    await firstCard.waitFor({ state: 'visible' });
-    result.hotel = (await firstCard.locator('[data-testid="title"]').innerText().catch(() => 'unknown')).trim();
- 
-    // Hotel detail page opens in a new tab
-    const [hotelPage] = await Promise.all([
-      context.waitForEvent('page'),
-      firstCard.locator('[data-testid="title-link"], a').first().click()
-    ]);
- 
-    // Wait for EITHER a reserve button OR a room-select to appear. Booking
-    // often has the first room pre-selected, so the reserve button alone is
-    // enough. This is more forgiving than waiting on the select specifically.
-    await hotelPage.waitForSelector(
-      'button:has-text("Voi rezerva"), button:has-text("I\'ll reserve"), button:has-text("Reserve"), select[name^="nr_rooms"]',
-      { timeout: 60_000 }
+    await firstCard.waitFor({ state: 'visible', timeout: timeoutMs });
+
+    result.hotel = (
+      (await safeText(firstCard.locator('[data-testid="title"]'))) ||
+      (await safeText(firstCard.locator('a'))) ||
+      'unknown'
+    ).trim();
+
+    const hotelPage = await openHotelDetailsFromCard(page, firstCard, timeoutMs);
+
+    await hotelPage.waitForLoadState('domcontentloaded').catch(() => null);
+
+    await waitForAnyVisible(
+      hotelPage,
+      [
+        'button:has-text("Voi rezerva")',
+        'button:has-text("I\'ll reserve")',
+        'button:has-text("Reserve")',
+        'button:has-text("Rezervă")',
+        'select[name^="nr_rooms"]',
+        '[data-testid="title"]'
+      ],
+      timeoutMs
     );
- 
-    // If there's a visible room-quantity select still at 0, bump it to 1.
-    try {
-      const hasSelect = await hotelPage.locator('select[name^="nr_rooms"]').first().isVisible({ timeout: 2000 });
-      if (hasSelect) {
-        await hotelPage.evaluate(() => {
-          const sel = document.querySelector('select[name^="nr_rooms"]');
-          if (sel && sel.value === '0') {
-            sel.value = '1';
-            sel.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-        });
-      }
-    } catch (_) { /* no select → already-selected default */ }
- 
-    // Click the first visible "Voi rezerva" / "Reserve" button.
-    const reserveBtn = hotelPage.getByRole('button', { name: /Voi rezerva|I'll reserve|Reserve/i }).first();
-    await reserveBtn.waitFor({ state: 'visible', timeout: 15_000 });
-    await reserveBtn.click();
- 
-    // Stage 2: fill minimal personal details. Wait on the element we'll act on
-    // rather than loadState, which is unreliable on Booking.
-    await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 45_000 });
- 
-    const [firstName, ...lastParts] = name.split(' ');
-    const lastName = lastParts.join(' ') || 'User';
- 
-    await hotelPage.fill('input[name="firstname"]', firstName);
-    await hotelPage.fill('input[name="lastname"]', lastName);
-    await hotelPage.fill('input[name="email"]', email);
-    try { await hotelPage.fill('input[name="email_confirm"]', email); } catch (_) {}
-    try {
-      const phoneInput = hotelPage.locator('input[type="tel"], input[name*="phone"]').first();
-      if (await phoneInput.isVisible()) await phoneInput.fill(phone);
-    } catch (_) {}
- 
-    // Proceed to stage 3. Again, skip waitForLoadState — wait on the element
-    // that marks stage 3 instead.
-    await hotelPage.getByRole('button', { name: /Urmează|Next|Ultimele detalii/i }).first().click();
-    await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 45_000 });
- 
-    // Read price BEFORE
-    await hotelPage.waitForTimeout(1500);
-    result.priceBefore = await getTotalPrice(hotelPage);
- 
-    // Apply the promo code
-    const codeInput = hotelPage.locator('input[placeholder*="promo" i], input[aria-label*="promo" i]').first();
-    await codeInput.waitFor({ state: 'visible', timeout: 15_000 });
-    await codeInput.fill(code);
- 
-    const applyBtn = hotelPage.getByRole('button', { name: /Aplicați|Apply/i }).first();
-    await applyBtn.click();
- 
-    // Wait for either an error message or a price update
-    await hotelPage.waitForTimeout(3500);
-    const bodyAfter = (await hotelPage.evaluate(() => document.body.innerText || '')).toLowerCase();
-    result.priceAfter = await getTotalPrice(hotelPage);
- 
-    if (/nu este valid|invalid code|not valid|nu este valabil/.test(bodyAfter)) {
+
+    await maybeSelectOneRoom(hotelPage);
+    await clickReserve(hotelPage, timeoutMs);
+    await fillGuestDetails(hotelPage, name, email, phone);
+    await goToFinalDetails(hotelPage);
+
+    await hotelPage.waitForTimeout(1800);
+    result.priceBefore = safeNumber(await getTotalPrice(hotelPage));
+
+    await applyPromoCode(hotelPage, code);
+
+    await hotelPage.waitForTimeout(4000);
+
+    const bodyAfter = (await getBodyText(hotelPage)).toLowerCase();
+    result.priceAfter = safeNumber(await getTotalPrice(hotelPage));
+
+    const outcome = detectPromoOutcome(bodyAfter);
+
+    if (outcome.valid === false) {
       result.valid = false;
-      result.reason = 'Booking a răspuns: codul nu este valid.';
-    } else if (result.priceBefore != null && result.priceAfter != null && result.priceAfter < result.priceBefore) {
+      result.reason = outcome.reason;
+    } else if (
+      result.priceBefore != null &&
+      result.priceAfter != null &&
+      result.priceAfter < result.priceBefore
+    ) {
       const d = result.priceBefore - result.priceAfter;
       result.valid = true;
       result.discount = +d.toFixed(2);
       result.discountPct = +((d / result.priceBefore) * 100).toFixed(2);
       result.reason = `Reducere aplicată: ${result.discount} lei (${result.discountPct}%).`;
-    } else {
+    } else if (
+      result.priceBefore != null &&
+      result.priceAfter != null &&
+      result.priceAfter >= result.priceBefore
+    ) {
       result.valid = false;
       result.reason = 'Prețul nu a scăzut după aplicarea codului. Respins.';
+    } else {
+      result.valid = false;
+      result.reason = 'Nu am putut determina sigur prețul înainte și după aplicarea codului.';
     }
   } catch (err) {
-    result.reason = 'Eroare în flux: ' + (err.message || String(err));
+    const activePage = context.pages().slice(-1)[0] || page;
+    const errorShot = path.join(screenshotsDir, `booking-error-${nowStamp()}.png`);
+    const saved = await captureScreenshot(activePage, errorShot);
+
+    result.reason = 'Eroare în flux: ' + (err && err.message ? err.message : String(err));
+    result.artifacts.errorScreenshot = saved;
   } finally {
     await browser.close();
   }
- 
+
   return result;
 }
- 
-// ---------- Exports (for server.js) ----------
+
+// ---------- Exports ----------
 module.exports = { verify };
- 
-// ---------- CLI entry (only when run directly) ----------
+
+// ---------- CLI entry ----------
 if (require.main === module) {
   (async () => {
-    const args = parseArgs(process.argv);
-    const verdict = await verify(args);
-    process.stdout.write(JSON.stringify(verdict, null, 2) + '\n');
-    process.exit(verdict.valid ? 0 : 1);
+    try {
+      const args = parseArgs(process.argv);
+      const verdict = await verify(args);
+      process.stdout.write(JSON.stringify(verdict, null, 2) + '\n');
+      process.exit(verdict.valid ? 0 : 1);
+    } catch (err) {
+      const fallback = {
+        code: null,
+        valid: false,
+        reason: 'Eroare fatală: ' + (err && err.message ? err.message : String(err)),
+        priceBefore: null,
+        priceAfter: null,
+        discount: 0,
+        discountPct: 0,
+        hotel: null,
+        checkedAt: new Date().toISOString()
+      };
+      process.stdout.write(JSON.stringify(fallback, null, 2) + '\n');
+      process.exit(1);
+    }
   })();
 }
