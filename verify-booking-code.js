@@ -170,9 +170,14 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       }
     } catch (_) { /* no select → already-selected default */ }
 
-    // Click the first visible "Voi rezerva" / "Reserve" button.
-    const reserveBtn = hotelPage.getByRole('button', { name: /Voi rezerva|I'll reserve|Reserve/i }).first();
-    await reserveBtn.waitFor({ state: 'visible', timeout: 15_000 });
+    // Click the first visible "Voi rezerva" element. Use a text-based locator
+    // that matches both <button> and <a>, because Booking sometimes renders
+    // the reserve action as a link styled like a button.
+    const reserveBtn = hotelPage.locator(
+      'button:has-text("Voi rezerva"), button:has-text("I\'ll reserve"), button:has-text("Reserve"), a:has-text("Voi rezerva"), a:has-text("I\'ll reserve"), a:has-text("Reserve")'
+    ).first();
+    await reserveBtn.waitFor({ state: 'visible', timeout: 30_000 });
+    await reserveBtn.scrollIntoViewIfNeeded().catch(() => {});
     await reserveBtn.click();
 
     // Stage 2: fill minimal personal details. Wait on the element we'll act on
