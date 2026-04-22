@@ -201,13 +201,30 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       }
     } catch (_) { /* no select → already-selected default */ }
 
-    // Click the first visible "Voi rezerva" element. Use a text-based locator
-    // that matches both <button> and <a>, because Booking sometimes renders
-    // the reserve action as a link styled like a button.
-    const reserveBtn = hotelPage.locator(
-      'button:has-text("Voi rezerva"), button:has-text("I\'ll reserve"), button:has-text("Reserve"), a:has-text("Voi rezerva"), a:has-text("I\'ll reserve"), a:has-text("Reserve")'
-    ).first();
-    await reserveBtn.waitFor({ state: 'visible', timeout: 20_000 });
+    // Click the reserve action. Booking uses many variants across hotels:
+    // "Voi rezerva", "Rezervă", "Book now", "Reserve", sometimes as <button>,
+    // sometimes as <a>, sometimes as <input type=submit>. Be generous.
+    const reserveBtn = hotelPage.locator([
+      'button:has-text("Voi rezerva")',
+      'button:has-text("Voi face o rezervare")',
+      'button:has-text("Rezervă")',
+      'button:has-text("Rezervați")',
+      'button:has-text("I\'ll reserve")',
+      'button:has-text("I will reserve")',
+      'button:has-text("I\'ll book")',
+      'button:has-text("Book now")',
+      'button:has-text("Reserve")',
+      'a:has-text("Voi rezerva")',
+      'a:has-text("Rezervă")',
+      'a:has-text("Reserve")',
+      'a:has-text("Book now")',
+      'input[type="submit"][value*="rezerv" i]',
+      'input[type="submit"][value*="book" i]',
+      'input[type="submit"][value*="reserve" i]',
+      'button[data-testid*="reserve" i]',
+      'button[data-testid*="book" i]'
+    ].join(', ')).first();
+    await reserveBtn.waitFor({ state: 'visible', timeout: 25_000 });
     await reserveBtn.scrollIntoViewIfNeeded().catch(() => {});
     await reserveBtn.click();
 
@@ -279,6 +296,23 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     }
   } catch (err) {
     result.reason = 'Eroare în flux: ' + (err.message || String(err));
+    // On failure, try to snapshot the page so we can see why locator missed.
+    // We grab the URL + the first 10 button texts. Cheap and hugely useful.
+    try {
+      const pages = context.pages();
+      const p = pages[pages.length - 1];
+      if (p) {
+        const url = p.url();
+        const btnTexts = await p.evaluate(() => {
+          const items = Array.from(document.querySelectorAll('button, a[role="button"], input[type="submit"]'));
+          return items.slice(0, 15).map(el => {
+            const t = (el.innerText || el.value || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+            return t || '(no text)';
+          });
+        }).catch(() => []);
+        result.reason += ` | URL: ${url} | Butoane găsite: ${JSON.stringify(btnTexts)}`;
+      }
+    } catch (_) { /* best-effort debug info */ }
   } finally {
     await browser.close();
   }
