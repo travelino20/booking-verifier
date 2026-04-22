@@ -105,8 +105,12 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
     viewport: { width: 1440, height: 900 }
   });
+  // Apply timeout at context level so any new page (e.g. the hotel tab that
+  // opens via target=_blank) inherits it. Otherwise the new page uses
+  // Playwright's default 30s which is too short for Booking.
+  context.setDefaultTimeout(timeoutMs);
+  context.setDefaultNavigationTimeout(timeoutMs);
   const page = await context.newPage();
-  page.setDefaultTimeout(timeoutMs);
 
   const result = {
     code,
@@ -143,10 +147,10 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       context.waitForEvent('page'),
       firstCard.locator('[data-testid="title-link"], a').first().click()
     ]);
-    await hotelPage.waitForLoadState('domcontentloaded');
 
-    // Pick a room: set quantity to 1 on the first <select name="nr_rooms_*">
-    await hotelPage.waitForSelector('select[name^="nr_rooms"]', { timeout: 30_000 });
+    // Don't waitForLoadState here — Booking keeps networking active, and the
+    // room-selector appears well before full load. Wait directly on the element.
+    await hotelPage.waitForSelector('select[name^="nr_rooms"]', { timeout: 45_000 });
     await hotelPage.evaluate(() => {
       const sel = document.querySelector('select[name^="nr_rooms"]');
       if (sel) {
@@ -158,9 +162,9 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     // Click "Voi rezerva" / "I'll reserve"
     await hotelPage.getByRole('button', { name: /Voi rezerva|I'll reserve|Reserve/i }).first().click();
 
-    // Stage 2: fill minimal personal details
-    await hotelPage.waitForLoadState('domcontentloaded');
-    await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 30_000 });
+    // Stage 2: fill minimal personal details. Wait on the element we'll act on
+    // rather than loadState, which is unreliable on Booking.
+    await hotelPage.waitForSelector('input[name="firstname"], input[id*="firstname"]', { timeout: 45_000 });
 
     const [firstName, ...lastParts] = name.split(' ');
     const lastName = lastParts.join(' ') || 'User';
@@ -174,10 +178,10 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       if (await phoneInput.isVisible()) await phoneInput.fill(phone);
     } catch (_) {}
 
-    // Proceed to stage 3
+    // Proceed to stage 3. Again, skip waitForLoadState — wait on the element
+    // that marks stage 3 instead.
     await hotelPage.getByRole('button', { name: /Urmează|Next|Ultimele detalii/i }).first().click();
-    await hotelPage.waitForLoadState('domcontentloaded');
-    await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 30_000 });
+    await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 45_000 });
 
     // Read price BEFORE
     await hotelPage.waitForTimeout(1500);
