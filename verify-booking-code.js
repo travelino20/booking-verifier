@@ -126,13 +126,22 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     ]
   });
   const context = await browser.newContext({
-    locale: 'ro-RO',
+    locale: 'en-GB',
+    // Booking geo-detects language by IP (Render = Frankfurt → German). Force
+    // English via Accept-Language header + locale. We also set a language
+    // cookie below after creation.
+    extraHTTPHeaders: {
+      'Accept-Language': 'en-GB,en;q=0.9'
+    },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
     viewport: { width: 1280, height: 720 }, // smaller viewport = less rendering memory
-    // Block images & fonts to save bandwidth and memory; they're irrelevant
-    // for reading the price and promo code fields.
     javaScriptEnabled: true
   });
+  // Language cookie — Booking respects this for the UI.
+  await context.addCookies([
+    { name: 'lang', value: 'en-gb', domain: '.booking.com', path: '/' },
+    { name: 'selected_currency', value: 'RON', domain: '.booking.com', path: '/' }
+  ]);
   // Block heavy resources (images, videos, fonts, stylesheets) — we only need
   // DOM + JS execution to read text. This alone can halve peak RAM on Booking.
   await context.route('**/*', (route) => {
@@ -167,15 +176,18 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
 
     // Skip the search step entirely. Go directly to a fixed hotel page (much
     // faster on low-memory hosts). Hotel chosen for stable single-room layout.
-    const hotelUrl = `https://www.booking.com/hotel/ro/tomis-garden-bucuresti.html?checkin=${checkin}&checkout=${checkout}&group_adults=2&no_rooms=1&selected_currency=RON`;
+    // Use the .en-gb.html variant explicitly to force the English UI. Combined
+    // with the lang=en-gb cookie, this reliably avoids Booking's geo-redirect
+    // to German/Dutch/etc on cloud IPs.
+    const hotelUrl = `https://www.booking.com/hotel/ro/tomis-garden-bucuresti.en-gb.html?checkin=${checkin}&checkout=${checkout}&group_adults=2&no_rooms=1&selected_currency=RON&lang=en-gb`;
     result.hotel = 'Tomis Garden București';
     const hotelPage = page;
 
     await hotelPage.goto(hotelUrl, { waitUntil: 'domcontentloaded' });
 
-    // Dismiss cookie banner if present
+    // Dismiss cookie banner (RO/EN/DE).
     try {
-      const refuse = hotelPage.getByRole('button', { name: /Refuz|Reject/i }).first();
+      const refuse = hotelPage.getByRole('button', { name: /Refuz|Reject|Ablehnen|Decline/i }).first();
       if (await refuse.isVisible({ timeout: 3000 })) await refuse.click();
     } catch (_) { /* ignore */ }
 
@@ -201,9 +213,9 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       }
     } catch (_) { /* no select → already-selected default */ }
 
-    // Click the reserve action. Booking uses many variants across hotels:
-    // "Voi rezerva", "Rezervă", "Book now", "Reserve", sometimes as <button>,
-    // sometimes as <a>, sometimes as <input type=submit>. Be generous.
+    // Click the reserve action. Booking varies wording by locale and layout:
+    // RO: "Voi rezerva", "Rezervă"; EN: "Reserve", "Book now", "I'll reserve";
+    // DE: "Reservieren", "Jetzt buchen".
     const reserveBtn = hotelPage.locator([
       'button:has-text("Voi rezerva")',
       'button:has-text("Voi face o rezervare")',
@@ -214,13 +226,17 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       'button:has-text("I\'ll book")',
       'button:has-text("Book now")',
       'button:has-text("Reserve")',
+      'button:has-text("Reservieren")',
+      'button:has-text("Jetzt buchen")',
       'a:has-text("Voi rezerva")',
       'a:has-text("Rezervă")',
       'a:has-text("Reserve")',
       'a:has-text("Book now")',
+      'a:has-text("Reservieren")',
       'input[type="submit"][value*="rezerv" i]',
       'input[type="submit"][value*="book" i]',
       'input[type="submit"][value*="reserve" i]',
+      'input[type="submit"][value*="reservieren" i]',
       'button[data-testid*="reserve" i]',
       'button[data-testid*="book" i]'
     ].join(', ')).first();
@@ -244,21 +260,34 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       if (await phoneInput.isVisible()) await phoneInput.fill(phone);
     } catch (_) {}
 
-    // Proceed to stage 3. Again, skip waitForLoadState — wait on the element
-    // that marks stage 3 instead.
-    await hotelPage.getByRole('button', { name: /Urmează|Next|Ultimele detalii/i }).first().click();
-    await hotelPage.waitForSelector('text=/cod promo|promotional|Detalii finale|Final details/i', { timeout: 30_000 });
+    // Proceed to stage 3. RO: "Urmează"; EN: "Next" / "Final details"; DE: "Weiter".
+    await hotelPage.getByRole('button', { name: /Urmează|Next|Ultimele detalii|Weiter|Nächster|Continue/i }).first().click();
+    await hotelPage.waitForSelector(
+      'text=/cod promo|promotional|Detalii finale|Final details|Gutscheincode|Promo-Code|Letzte Angaben|Abschließende/i',
+      { timeout: 30_000 }
+    );
 
     // Read price BEFORE
     await hotelPage.waitForTimeout(1500);
     result.priceBefore = await getTotalPrice(hotelPage);
 
-    // The promo code field is usually collapsed behind a toggle: "Adaugă un cod
-    // promoțional" / "Enter a promotional code". Try to expand first.
+    // Expand the promo-code section if it's collapsed behind a toggle.
+    // RO: "cod promoțional"; EN: "promo code" / "promotional code"; DE: "Gutscheincode".
     try {
-      const expand = hotelPage.locator(
-        'button:has-text("cod promoțional"), button:has-text("cod promo"), button:has-text("promotional code"), button:has-text("promo code"), a:has-text("cod promoțional"), a:has-text("promo code"), summary:has-text("cod promo"), summary:has-text("promotional")'
-      ).first();
+      const expand = hotelPage.locator([
+        'button:has-text("cod promoțional")',
+        'button:has-text("cod promo")',
+        'button:has-text("promotional code")',
+        'button:has-text("promo code")',
+        'button:has-text("Gutscheincode")',
+        'button:has-text("Promo-Code")',
+        'a:has-text("cod promoțional")',
+        'a:has-text("promo code")',
+        'a:has-text("Gutscheincode")',
+        'summary:has-text("cod promo")',
+        'summary:has-text("promotional")',
+        'summary:has-text("Gutscheincode")'
+      ].join(', ')).first();
       if (await expand.isVisible({ timeout: 3000 })) {
         await expand.click();
         await hotelPage.waitForTimeout(500);
@@ -273,7 +302,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     await codeInput.waitFor({ state: 'visible', timeout: 20_000 });
     await codeInput.fill(code);
 
-    const applyBtn = hotelPage.getByRole('button', { name: /Aplicați|Apply/i }).first();
+    const applyBtn = hotelPage.getByRole('button', { name: /Aplicați|Apply|Anwenden|Übernehmen/i }).first();
     await applyBtn.click();
 
     // Wait for either an error message or a price update
@@ -281,7 +310,7 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     const bodyAfter = (await hotelPage.evaluate(() => document.body.innerText || '')).toLowerCase();
     result.priceAfter = await getTotalPrice(hotelPage);
 
-    if (/nu este valid|invalid code|not valid|nu este valabil/.test(bodyAfter)) {
+    if (/nu este valid|invalid code|not valid|nu este valabil|nicht gültig|ungültig|ungueltig/.test(bodyAfter)) {
       result.valid = false;
       result.reason = 'Booking a răspuns: codul nu este valid.';
     } else if (result.priceBefore != null && result.priceAfter != null && result.priceAfter < result.priceBefore) {
