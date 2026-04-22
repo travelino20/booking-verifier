@@ -1,0 +1,13 @@
+{
+  "name": "booking-codes",
+  "version": "1.0.0",
+  "description": "Schimb de coduri de reducere Booking.com, cu verificare automată prin Playwright.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "verify": "node verify-booking-code.js"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}
