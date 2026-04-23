@@ -358,10 +358,37 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
     const applyBtn = hotelPage.getByRole('button', { name: /Aplicați|Apply|Anwenden|Übernehmen/i }).first();
     await applyBtn.click();
 
-    // Wait for either an error message or a price update
-    await hotelPage.waitForTimeout(3500);
-    const bodyAfter = (await hotelPage.evaluate(() => document.body.innerText || '')).toLowerCase();
-    result.priceAfter = await getTotalPrice(hotelPage);
+    // Fast adaptive polling: ONE evaluate() per iteration that returns both
+    // the body text (for error detection) AND a best-effort price extraction,
+    // instead of calling document.body.innerText twice (once here, once inside
+    // getTotalPrice). That halves the per-iteration cost on Booking's heavy DOM.
+    // Exits as soon as we see a rejection message OR a price change.
+    const deadline = Date.now() + 3000;
+    const errorRe = /nu este valid|invalid code|not valid|nu este valabil|nicht gültig|ungültig|ungueltig|doesn't apply|does not apply|cannot be applied/i;
+    let bodyAfter = '';
+    let priceNow = result.priceBefore;
+    let resolved = false;
+    while (Date.now() < deadline) {
+      await hotelPage.waitForTimeout(200);
+      const snap = await hotelPage.evaluate(() => {
+        const txt = document.body.innerText || '';
+        // Try a couple of specific total-price shapes inline.
+        const m = txt.match(/Total\s*\n?\s*([\d.,]+\s*lei)/i)
+               || txt.match(/([\d.,]+\s*lei)\s*(?:Include taxe|Total)/i);
+        return { txt, totalRaw: m ? m[1] : null };
+      }).catch(() => ({ txt: '', totalRaw: null }));
+      bodyAfter = snap.txt.toLowerCase();
+      if (errorRe.test(snap.txt)) { resolved = true; break; }
+      if (snap.totalRaw) {
+        const parsed = parsePriceRo(snap.totalRaw);
+        if (parsed != null) priceNow = parsed;
+      }
+      if (priceNow != null && result.priceBefore != null && priceNow !== result.priceBefore) {
+        resolved = true;
+        break;
+      }
+    }
+    result.priceAfter = priceNow;
 
     if (/nu este valid|invalid code|not valid|nu este valabil|nicht gültig|ungültig|ungueltig/.test(bodyAfter)) {
       result.valid = false;
@@ -396,7 +423,10 @@ async function verify({ code, headful, name, email, phone, timeoutMs }) {
       }
     } catch (_) { /* best-effort debug info */ }
   } finally {
-    await browser.close();
+    // Close the browser asynchronously — we have the verdict already, the user
+    // shouldn't wait for Chromium to tear down (can be 1-3s with --single-process).
+    // Fire-and-forget; if close fails we don't care, the process exits anyway.
+    browser.close().catch(() => {});
   }
 
   return result;
